@@ -9,7 +9,7 @@ from flask import Flask, jsonify, request, render_template, Response
 from model import forecast, evaluate, instant
 from calendar_stats import calendar_summary
 from store import connect, seed_demo, records, now
-from ingest import import_csv, KINDS, refresh, refresh_news, load_history
+from ingest import import_csv, KINDS, refresh, refresh_news, load_history, ImportControl, ImportCancelled
 
 def availability(news, cutoff):
     eligible = sorted([n for n in news if instant(n['published_at']) <= instant(cutoff) and instant(n['retrieved_at']) <= instant(cutoff)], key=lambda n: instant(n['published_at']), reverse=True)
@@ -32,6 +32,37 @@ def create_app(db_path=None):
 
     def db_open():
         return connect(app.config['DB_PATH'])
+
+    # Single-process personal app: network imports run off the HTTP request thread.
+    # Jobs are intentionally transient; a server restart reports an interrupted job.
+    jobs={}
+    jobs_lock=threading.Lock()
+
+    def job_view(job):
+        return {k:v for k,v in job.items() if k not in ('control','started')}
+
+    def run_history_job(job_id, years):
+        with jobs_lock:
+            job=jobs[job_id]
+            job['status']='running'
+            control=job['control']
+        try:
+            with db_open() as db:
+                result=load_history(db,years,control)
+            with jobs_lock:
+                job.update(status='complete',result=result,message='Import complete')
+        except Exception as exc:
+            if isinstance(exc,ImportCancelled):
+                message=str(exc)
+                status='cancelled'
+            elif isinstance(exc,TimeoutError):
+                message='ESPN did not finish responding within the import time limit. No game snapshots were changed. Try again later or use CSV import.'
+                status='failed'
+            else:
+                message=f'ESPN import failed ({type(exc).__name__}). ESPN may be unavailable or blocked on this connection. No game snapshots were changed. Try again later or use CSV import.'
+                status='failed'
+            with jobs_lock:
+                job.update(status=status,error=message,message=message)
 
     def mode(db):
         return db.execute("SELECT value FROM settings WHERE key='mode'").fetchone()[0]
@@ -193,12 +224,41 @@ def create_app(db_path=None):
         years=(request.get_json(silent=True) or {}).get('seasons',[year-2,year-1,year])
         if not isinstance(years,list) or not 1<=len(years)<=5 or any(type(y) is not int or not 1997<=y<=year for y in years):
             raise ValueError('Choose one to five seasons between 1997 and the current year.')
-        try:
-            with db_open() as db:
-                result=load_history(db,sorted(set(years)))
-            return jsonify(result)
-        except Exception as exc:
-            return jsonify(error=f'ESPN game-log import failed ({type(exc).__name__}). Existing game snapshots are unchanged. Use CSV import if access remains blocked.'),502
+        with jobs_lock:
+            for job in jobs.values():
+                if job['status'] in ('queued','running','cancelling'):
+                    return jsonify(job_id=job['job_id'],status=job['status'],reused=True),202
+            # Retain recent completion/error results without unbounded process memory.
+            while len(jobs)>=20:
+                jobs.pop(next(iter(jobs)))
+            job_id=uuid.uuid4().hex
+            def progress(message,current,total):
+                with jobs_lock:
+                    jobs[job_id].update(message=message,current=current,total=total)
+            control=ImportControl(progress)
+            jobs[job_id]={'job_id':job_id,'status':'queued','message':'Connecting to ESPN',
+                          'current':0,'total':0,'started':time.monotonic(),'control':control,'seasons':sorted(set(years))}
+        threading.Thread(target=run_history_job,args=(job_id,sorted(set(years))),daemon=True,name='history-import').start()
+        return jsonify(job_id=job_id,status='queued'),202
+
+    @app.get('/api/history/jobs/<job_id>')
+    def history_status(job_id):
+        with jobs_lock:
+            job=jobs.get(job_id)
+            if not job:
+                return jsonify(error='Import job not found. The app may have restarted. Start a new import; saved records remain.'),404
+            return jsonify(**job_view(job),elapsed_seconds=int(time.monotonic()-job['started']))
+
+    @app.post('/api/history/jobs/<job_id>/cancel')
+    def history_cancel(job_id):
+        with jobs_lock:
+            job=jobs.get(job_id)
+            if not job:
+                return jsonify(error='Import job not found. The app may have restarted.'),404
+            if job['status'] in ('queued','running','cancelling'):
+                job['control'].cancelled.set()
+                job.update(status='cancelling',message='Cancelling import; existing game records are retained')
+            return jsonify(job_view(job))
 
     @app.post('/api/forecasts')
     def save_forecasts():

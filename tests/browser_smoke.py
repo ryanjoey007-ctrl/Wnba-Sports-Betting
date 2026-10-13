@@ -83,7 +83,22 @@ with tempfile.TemporaryDirectory() as temporary:
             assert 'Synthetic demo evidence only' in page.locator('#answer').inner_text()
             page.goto(base)
             page.wait_for_selector('.player-name')
-            page.click('#switch-mode')
+            page.click('#open-data')
+            page.wait_for_selector('#data-dialog[open]')
+            page.route('**/api/history/load',lambda route:route.fulfill(status=202,content_type='application/json',body='{"job_id":"browser-import","status":"queued"}'))
+            polls={'n':0}
+            def history_status(route):
+                polls['n']+=1
+                body='{"status":"running","message":"Downloading player-season game logs","current":3,"total":15,"elapsed_seconds":1}' if polls['n']==1 else '{"status":"complete","message":"Import complete","current":15,"total":15,"elapsed_seconds":2,"result":{"records":0,"games_checked":0,"seasons":[2024,2025,2026],"unmatched":[]}}'
+                route.fulfill(status=200,content_type='application/json',body=body)
+            page.route('**/api/history/jobs/browser-import',history_status)
+            page.click('#load-seasons')
+            page.wait_for_function("document.querySelector('#history-message').textContent.includes('3/15')")
+            assert page.locator('#load-seasons').is_disabled()
+            page.wait_for_selector('#history-view:visible')
+            assert 'Import complete' in page.locator('#history-message').inner_text()
+            assert not page.locator('#load-seasons').is_disabled()
+            page.click('#history-view')
             page.wait_for_function("document.querySelector('#mode-label').textContent.includes('sourced-data')")
             assert page.locator('.points').count()==0
             page.click('#open-data')
@@ -131,6 +146,6 @@ with tempfile.TemporaryDirectory() as temporary:
             page.screenshot(path=str(output/'dashboard.png'),full_page=True)
             assert errors==[],errors
             browser.close()
-            print('PASS: watchlist, search, add/remove, threshold, snapshots, details/charts, 31 calendar days, season filtering, historical frequencies, news error states, Q&A, real/demo isolation, CSV imports and mobile layout; no browser JS errors.')
+            print('PASS: watchlist, thresholds, snapshots, charts, calendar filters, import progress/completion and view-data action, error states, Q&A, real/demo isolation, CSV imports and mobile layout; no browser JS errors.')
     finally:
         process.terminate();process.wait(timeout=10)

@@ -7,10 +7,18 @@ const link = url => url && /^https?:\/\//.test(url) ? `<a href="${esc(url)}" tar
 let state = {players:[],mode:'demo'}, activeThreshold = null, detailId = location.pathname.startsWith('/player/') ? decodeURIComponent(location.pathname.split('/')[2]) : null;
 try { const saved=sessionStorage.getItem('threshold'); if(saved!==null && Number.isFinite(+saved) && +saved>=0 && +saved<=200){activeThreshold=+saved;$('#threshold').value=saved;} } catch(e) { /* Storage is optional. */ }
 async function api(path, opts={}) {
-  const r = await fetch(path,{...opts,headers:{'X-WNBA-Client':'1',...(opts.body && !(opts.body instanceof FormData)?{'Content-Type':'application/json'}:{}),...opts.headers}});
-  const d = await r.json();
-  if (!r.ok) throw new Error(d.error || 'Request failed. Please try again.');
-  return d;
+  const {timeoutMs=20000,...options}=opts;
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try {
+    const r = await fetch(path,{...options,signal:controller.signal,headers:{'X-WNBA-Client':'1',...(options.body && !(options.body instanceof FormData)?{'Content-Type':'application/json'}:{}),...options.headers}});
+    let d;try{d=await r.json();}catch(e){throw new Error(`Courtwise returned an unexpected response (HTTP ${r.status}). Check the PowerShell window for an error.`);}
+    if (!r.ok) throw new Error(d.error || 'Request failed. Please try again.');
+    return d;
+  } catch(e) {
+    if(e.name==='AbortError') throw new Error('Courtwise did not respond in time. Keep PowerShell open and check it for an error.');
+    if(e instanceof TypeError) throw new Error('Cannot reach Courtwise. Check that PowerShell is still running the app, then try again.');
+    throw e;
+  } finally {clearTimeout(timer);}
 }
 function notice(message,error=false){$('#notice').hidden=false;$('#notice').className=error?'error':'';$('#notice').textContent=message;}
 const query = () => activeThreshold==null?'':`?threshold=${encodeURIComponent(activeThreshold)}`;
@@ -50,9 +58,42 @@ async function openData(){
 $('#open-data').onclick=openData;$('#sources-link').onclick=openData;$('#close-data').onclick=()=>$('#data-dialog').close();
 $('#import-kind').onchange=e=>$('#template-link').href='/api/template/'+e.target.value;
 $('#import-form').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;$('#import-result').textContent='Validating and importing…';try{const d=await api('/api/import/'+$('#import-kind').value,{method:'POST',body:new FormData(e.target)});$('#import-result').textContent=`Imported ${d.imported} records into your real-data workspace. Switch to “Use my data” to view them.`;await load();}catch(e){$('#import-result').textContent=e.message;}finally{button.disabled=false;}};
-async function refreshSources(button,days=0){button.disabled=true;const text=button.textContent;button.textContent='Fetching public sources…';try{const d=await api('/api/refresh',{method:'POST',body:JSON.stringify({history_days:days})});await load();notice(`Refreshed ${d.records} schedule/game records${d.news?' and '+d.news.reports+' public reports':''} for ${d.matched_players} matched players.${d.unmatched.length?' Unmatched: '+d.unmatched.join(', '):''} ${d.news_warning||''} ${state.mode==='demo'?'Switch to your data to view them.':''}`,!!d.news_warning);}catch(e){notice(e.message,true);if($('#data-dialog').open)$('#import-result').textContent=e.message;}finally{button.disabled=false;button.textContent=text;}}
+async function refreshSources(button,days=0){button.disabled=true;const text=button.textContent;button.textContent='Fetching public sources…';try{const d=await api('/api/refresh',{method:'POST',body:JSON.stringify({history_days:days}),timeoutMs:180000});await load();notice(`Refreshed ${d.records} schedule/game records${d.news?' and '+d.news.reports+' public reports':''} for ${d.matched_players} matched players.${d.unmatched.length?' Unmatched: '+d.unmatched.join(', '):''} ${d.news_warning||''} ${state.mode==='demo'?'Switch to your data to view them.':''}`,!!d.news_warning);}catch(e){notice(e.message,true);if($('#data-dialog').open)$('#import-result').textContent=e.message;}finally{button.disabled=false;button.textContent=text;}}
 $('#refresh').onclick=e=>refreshSources(e.currentTarget);$('#history-refresh').onclick=e=>refreshSources(e.currentTarget,30);
-async function sourceAction(button,endpoint){button.disabled=true;const text=button.textContent;button.textContent='Loading ESPN data…';try{const d=await api(endpoint,{method:'POST',body:'{}'});const message=d.reports!==undefined?`Loaded ${d.reports} new public ESPN reports.`:`Loaded ${d.records} new real game logs across ${d.seasons.join(', ')}.`;await load();const result=message+(d.unmatched.length?' Unmatched: '+d.unmatched.join(', ')+'.':'')+(state.mode==='demo'?' Click “Use my data” on the dashboard to view real records.':'');notice(result);if($('#data-dialog').open)$('#import-result').textContent=result;}catch(e){notice(e.message,true);if($('#data-dialog').open)$('#import-result').textContent=e.message;}finally{button.disabled=false;button.textContent=text;}}
+let historyJobId=null;
+function historyProgress(message,job=null,error=false){
+  $('#history-progress').hidden=false;$('#history-progress').className=error?'import-progress error':'import-progress';
+  $('#history-message').textContent=message;
+  const bar=$('#history-bar');bar.hidden=error;
+  if(job?.total){bar.max=job.total;bar.value=job.current;}else bar.removeAttribute('value');
+}
+async function waitForHistory(jobId){
+  const started=Date.now();
+  while(Date.now()-started<150000){
+    const job=await api('/api/history/jobs/'+encodeURIComponent(jobId),{timeoutMs:10000});
+    const counts=job.total?` — ${job.current}/${job.total}`:'';
+    historyProgress(`${job.message}${counts} · ${job.elapsed_seconds}s`,job);
+    if(job.status==='complete')return job.result;
+    if(job.status==='failed'||job.status==='cancelled')throw new Error(job.error||job.message);
+    await new Promise(resolve=>setTimeout(resolve,1000));
+  }
+  throw new Error('The import status stopped updating. Check PowerShell. Saved records remain; restarting the app stops an interrupted import.');
+}
+async function sourceAction(button,endpoint){
+  button.disabled=true;const text=button.textContent;button.textContent='Loading ESPN data…';const isHistory=endpoint==='/api/history/load';
+  if(isHistory){historyProgress('Starting import. Checking ESPN connectivity…');$('#history-view').hidden=true;}
+  try{
+    let d=await api(endpoint,{method:'POST',body:'{}',timeoutMs:isHistory?20000:180000});
+    if(d.job_id){historyJobId=d.job_id;$('#history-cancel').hidden=false;d=await waitForHistory(d.job_id);}
+    const message=d.reports!==undefined?`Loaded ${d.reports} new public ESPN reports.`:d.records===0?`Import complete: ${d.games_checked??'the available'} game logs checked; no new records needed. Cached records are retained.`:`Import complete: loaded ${d.records} new real game logs across ${d.seasons.join(', ')}.`;
+    await load();const result=message+(d.unmatched.length?' Unmatched: '+d.unmatched.join(', ')+'.':'')+(state.mode==='demo'?' Click “Use my data” on the dashboard to view real records.':'');
+    notice(result);if($('#data-dialog').open)$('#import-result').textContent=result;
+    if(isHistory){historyProgress(result,{current:1,total:1});$('#history-view').hidden=false;}
+  }catch(e){notice(e.message,true);if($('#data-dialog').open)$('#import-result').textContent=e.message;if(isHistory)historyProgress(e.message,null,true);}
+  finally{button.disabled=false;button.textContent=text;if(isHistory){historyJobId=null;$('#history-cancel').hidden=true;$('#history-cancel').disabled=false;}}
+}
+$('#history-cancel').onclick=async()=>{if(!historyJobId)return;$('#history-cancel').disabled=true;try{await api('/api/history/jobs/'+encodeURIComponent(historyJobId)+'/cancel',{method:'POST',body:'{}'});historyProgress('Cancelling import; existing game records are retained.');}catch(e){historyProgress(e.message,null,true);$('#history-cancel').disabled=false;}};
+$('#history-view').onclick=async()=>{try{await api('/api/mode',{method:'POST',body:JSON.stringify({mode:'live'})});$('#data-dialog').close();await load();notice('Showing your real-data workspace. Click a player for imported logs and calendar averages.');}catch(e){historyProgress(e.message,null,true);}};
 $('#load-seasons').onclick=e=>sourceAction(e.currentTarget,'/api/history/load');
 $('#news-refresh').onclick=e=>sourceAction(e.currentTarget,'/api/news/refresh');
 $('#save-forecasts').onclick=async()=>{try{const d=await api('/api/forecasts',{method:'POST',body:JSON.stringify({threshold:activeThreshold})});notice(`Saved ${d.saved} timestamped snapshots. Earlier forecasts are preserved.${state.mode==='demo'?' These are synthetic demo forecasts.':''}`);}catch(e){notice(e.message,true);}};

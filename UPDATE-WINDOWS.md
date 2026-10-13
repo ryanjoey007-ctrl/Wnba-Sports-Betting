@@ -22,8 +22,8 @@ Scrolling dependency-install messages are normal. The final command stays runnin
 
 ## Use the new features
 
-1. Click **Data & sources → Load last 3 seasons of real logs** and wait for the result.
-2. Close the dialog and choose **Use my data** to see real records.
+1. Click **Data & sources → Load last 3 seasons of real logs**. Watch the progress beside the button; it shows the phase and number of downloads. If ESPN cannot respond, an error replaces the loading state within the time limit. Cancel import is available before completion.
+2. On completion, click **View imported data** beside the progress message. It switches to the real-data workspace. Alternatively, close the dialog and choose **Use my data** on the dashboard. Importing does not silently replace demo records. If your older installation already completed with HTTP 200, those records remain saved; switch to real-data mode to see them without importing again.
 3. Click **Refresh sources** for upcoming games and public news, or **Data & sources → Refresh ESPN news & reports** for news alone.
 4. Click a player's name. The new **Scoring by day of the month** chart shows average points for calendar days 1–31, with sample counts and a season filter. Use the day selector to inspect a bucket and its source-linked game records.
 5. Enter a threshold such as **22.5** on the dashboard, click **Apply**, then open a player. The calendar panel shows historical below/above/tie frequencies, clearly separate from model probabilities.

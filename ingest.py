@@ -8,6 +8,9 @@ import urllib.request
 import urllib.parse
 import unicodedata
 import hashlib
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta, timezone
 from model import instant
 from store import now, put
@@ -102,22 +105,81 @@ def import_csv(db, kind, contents):
     db.commit()
     return len(parsed)
 
+class ImportCancelled(Exception):
+    pass
+
+class ImportControl:
+    def __init__(self, progress=None, seconds=120):
+        self.deadline=time.monotonic()+seconds
+        self.cancelled=threading.Event()
+        self.progress=progress or (lambda message,current,total: None)
+
+    def check(self):
+        if self.cancelled.is_set():
+            raise ImportCancelled('Import cancelled. Existing game records were preserved.')
+        if time.monotonic()>=self.deadline:
+            raise TimeoutError('ESPN import exceeded two minutes. Existing game records were preserved.')
+
 def fetch(url):
+    started=time.monotonic()
     req = urllib.request.Request(url, headers={'User-Agent':'WNBA-Personal-Forecast/1.0','Accept':'application/json'})
-    with urllib.request.urlopen(req, timeout=15) as response:
-        return json.load(response)
+    with urllib.request.urlopen(req, timeout=10) as response:
+        chunks=[]
+        size=0
+        while True:
+            if time.monotonic()-started>20:
+                raise TimeoutError('ESPN response took too long.')
+            chunk=response.read1(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size+=len(chunk)
+            if size>8*1024*1024:
+                raise ValueError('ESPN response was larger than expected.')
+        return json.loads(b''.join(chunks))
+
+def fetch_many(urls, control=None, label='Downloading ESPN records'):
+    """Bounded parallel requests; cancellation/deadline never waits on executor exit."""
+    control=control or ImportControl()
+    control.check()
+    control.progress(label,0,len(urls))
+    results=[None]*len(urls)
+    pool=ThreadPoolExecutor(max_workers=3,thread_name_prefix='espn')
+    pending={}
+    try:
+        pending={pool.submit(fetch,url):i for i,url in enumerate(urls)}
+        done_count=0
+        while pending:
+            control.check()
+            finished,_=wait(pending,timeout=.25,return_when=FIRST_COMPLETED)
+            for future in finished:
+                control.check()
+                index=pending.pop(future)
+                results[index]=future.result()
+                done_count+=1
+                control.progress(label,done_count,len(urls))
+        return results
+    finally:
+        for future in pending:
+            future.cancel()
+        pool.shutdown(wait=False,cancel_futures=True)
 
 def normalize(name):
     return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKD', name).lower())
 
-def resolve_players(db):
+def resolve_players(db, control=None, reuse_ids=False):
     """Resolve identities from public roster IDs without collecting personal data."""
     tracked = list(db.execute('SELECT * FROM players WHERE tracked=1'))
-    teams = fetch(BASE+'/teams')['sports'][0]['leagues'][0]['teams']
+    if not tracked:
+        raise ValueError('Track at least one player before importing.')
+    if reuse_ids and all(p['espn_id'] for p in tracked):
+        return [(dict(p),p['espn_id'],p['team_id']) for p in tracked],[]
+    control=control or ImportControl()
+    teams = fetch_many([BASE+'/teams'],control,'Connecting to ESPN')[0]['sports'][0]['leagues'][0]['teams']
     identity = {}
-    for entry in teams:
+    rosters=fetch_many([BASE+f"/teams/{entry['team']['id']}/roster" for entry in teams],control,'Finding player IDs in team rosters')
+    for entry,roster in zip(teams,rosters):
         team = entry['team']
-        roster = fetch(BASE+f"/teams/{team['id']}/roster")
         for athlete in roster.get('athletes', []):
             # Some ESPN sports group athletes by position.
             athletes = athlete.get('items', [athlete])
@@ -266,17 +328,22 @@ def parse_gamelog(data, timestamp, season, url):
                     skipped+=1
     return list(rows.values()),skipped
 
-def load_history(db, seasons):
-    matched,unmatched=resolve_players(db)
+def load_history(db, seasons, control=None):
+    control=control or ImportControl()
+    matched,unmatched=resolve_players(db,control,reuse_ids=True)
     timestamp=now()
     rows=[]
     skipped=0
-    for player,aid,tid in matched:
-        for season in seasons:
-            url=f'{GAMELOG_BASE}/{aid}/gamelog?season={season}'
-            parsed,missing=parse_gamelog(fetch(url),timestamp,season,url)
-            skipped+=missing
-            rows.extend((player['id'],r) for r in parsed)
+    tasks=[(player,season,f'{GAMELOG_BASE}/{aid}/gamelog?season={season}') for player,aid,tid in matched for season in seasons]
+    downloaded=fetch_many([t[2] for t in tasks],control,'Downloading player-season game logs')
+    timestamp=now()
+    for (player,season,url),payload in zip(tasks,downloaded):
+        control.check()
+        parsed,missing=parse_gamelog(payload,timestamp,season,url)
+        skipped+=missing
+        rows.extend((player['id'],r) for r in parsed)
+    control.check()
+    control.progress('Saving verified game snapshots',0,len(rows))
     added=0
     persist_identities(db,matched)
     for pid,r in rows:
@@ -284,8 +351,10 @@ def load_history(db, seasons):
             put(db,'live','logs',pid,r['id'],r)
             added+=1
     db.execute("INSERT OR REPLACE INTO settings VALUES ('last_history_refresh',?)",(timestamp,))
+    control.check()
     db.commit()
-    return {'records':added,'matched_players':len(matched),'unmatched':unmatched,'seasons':seasons,'skipped_rows':skipped,'retrieved_at':timestamp}
+    control.progress('Import complete',len(rows),len(rows))
+    return {'records':added,'games_checked':len(rows),'matched_players':len(matched),'unmatched':unmatched,'seasons':seasons,'skipped_rows':skipped,'retrieved_at':timestamp}
 
 def refresh(db, history_days=0):
     """Game snapshots use retrieval times; public injury records retain report times."""
