@@ -33,3 +33,7 @@ Public news and injury reports include source links, publication dates and retri
 ## If Use my data looks blank
 
 The updated dashboard shows GAME LOGS and RECENT AVG separately from next-game forecasts. The banner reports how many real logs are loaded. Click a player to see Recent game log and the calendar chart. If those logs exist but future projections are dashes, there is no upcoming game in the loaded schedule or the player is ruled out; historical imports are not missing. Load schedules with Refresh sources when available, without inventing fixtures. If Recent game log says No game logs imported, copy the result message from the history import into chat; an HTTP 200 alone can include an empty result, and the imported count must be checked. If rows tell you to restart for counts, stop and restart the Python app and press Ctrl+F5: the browser was serving newer scripts against an older running server. Do not delete the data folder.
+
+## Exhibition-game correction
+
+The latest version excludes All-Star games from scoring averages and forecasts. TEAM COOP on 26 July 2026 is source-verified as an All-Star opponent. Existing raw logs stay saved and visible with an exclusion label; source-verified legacy event IDs are filtered when the app reads them, so the correction does not require deleting or reimporting your database. Update files, restart the app and press Ctrl+F5. Previously saved forecasts remain unchanged.

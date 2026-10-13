@@ -2,8 +2,9 @@
 import math
 from datetime import datetime, timezone
 from scipy.stats import nbinom, poisson
+from game_scope import scoring_appearance, exclusion_reason
 
-VERSION = 'minutes-rate-v1'
+VERSION = 'minutes-rate-v1.1'
 
 def instant(value):
     dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -13,7 +14,7 @@ def instant(value):
 
 def eligible(logs, cutoff):
     at = instant(cutoff)
-    return sorted([g for g in logs if g['appeared'] and g['minutes'] > 0
+    return sorted([g for g in logs if scoring_appearance(g)
                    and instant(g['game_at']) < at and instant(g['available_at']) < at],
                   key=lambda g: instant(g['game_at']))
 
@@ -72,7 +73,7 @@ def evaluate(logs, threshold=None):
     ordered = sorted(logs, key=lambda g: instant(g['game_at']))
     rows = []
     for game in ordered:
-        if not game['appeared'] or game['minutes'] <= 0:
+        if not scoring_appearance(game):
             continue
         f = forecast(ordered, game['game_at'], threshold)
         if f is None:
@@ -90,6 +91,7 @@ def evaluate(logs, threshold=None):
         rows.append(row)
     n = len(rows)
     metrics = {'n': n, 'missed_games': sum(not g['appeared'] for g in logs),
+               'excluded_games':sum(bool(exclusion_reason(g)) for g in logs),
                'mae': None, 'baseline_mae': None, 'coverage': None, 'brier': None, 'calibration': []}
     if n:
         metrics.update(mae=round(sum(abs(r['actual'] - r['forecast']) for r in rows) / n, 3),

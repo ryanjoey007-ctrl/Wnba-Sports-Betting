@@ -13,6 +13,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta, timezone
 from model import instant
+from game_scope import exclusion_reason
 from store import now, put
 
 BASE = 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba'
@@ -308,7 +309,7 @@ def parse_gamelog(data, timestamp, season, url):
                 try:
                     ident=str(entry['eventId'])
                     event=data['events'][ident]
-                    if event.get('isAllStar'):
+                    if exclusion_reason(event):
                         continue
                     start=event['gameDate']
                     if instant(start)>=instant(timestamp):

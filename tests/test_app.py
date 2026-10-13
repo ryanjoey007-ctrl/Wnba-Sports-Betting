@@ -55,7 +55,7 @@ def test_csv_forecast_and_append_only_history(client):
     history=client.get('/api/player/aja-wilson').get_json()['history']
     assert len(history)==2 and history[0]['id']!=history[1]['id']
     assert all(h['outcome']=='pending' and h['actual'] is None for h in history)
-    assert all(h['forecast']['model_version']=='minutes-rate-v1' for h in history)
+    assert all(h['forecast']['model_version']=='minutes-rate-v1.1' for h in history)
     rows[0]['points']=80
     assert client.post('/api/import/logs',data=csvfile(rows),headers=HEAD).status_code==400
 

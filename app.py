@@ -6,7 +6,8 @@ import uuid
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, render_template, Response
-from model import forecast, evaluate, instant, eligible
+from model import forecast, evaluate, instant, eligible, VERSION
+from game_scope import exclusion_reason
 from calendar_stats import calendar_summary
 from store import connect, seed_demo, records, now
 from ingest import import_csv, KINDS, refresh, refresh_news, load_history, ImportControl, ImportCancelled
@@ -87,7 +88,7 @@ def create_app(db_path=None):
         f = forecast(logs, at,t,a['minutes_cap']) if game and a['status']!='out' else None
         last = max([r['retrieved_at'] for r in logs+schedules+news], default=None)
         stale = last is None or instant(at)-instant(last)>timedelta(hours=48)
-        latest_stat = max([l['game_at'] for l in logs if l['appeared']], key=instant, default=None)
+        latest_stat = appearances[-1]['game_at'] if appearances else None
         stats_stale = latest_stat is None or instant(at)-instant(latest_stat)>timedelta(days=14)
         return {**dict(player),'next_game':game,'availability':a,'forecast':f,'last_updated':last,
                 'log_count':len(logs),'appearance_count':len(appearances),
@@ -174,7 +175,7 @@ def create_app(db_path=None):
             m = mode(db)
             t = threshold()
             result = player_view(db,p,m,t)
-            logs = sorted(records(db,m,'logs',pid), key=lambda l:instant(l['game_at']))
+            logs = sorted([{**g,'exclusion_reason':exclusion_reason(g)} for g in records(db,m,'logs',pid)], key=lambda l:instant(l['game_at']))
             result['logs'] = logs
             result['calendar'] = calendar_summary(logs,now(),t,next_game_at=result['next_game']['game_at'] if result['next_game'] else None)
             result['evaluation'] = evaluate(logs,t)
@@ -282,7 +283,7 @@ def create_app(db_path=None):
                     continue
                 # Save out/unknown status too; earlier snapshots are append-only.
                 payload = {'forecast':v['forecast'],'availability':v['availability'],
-                           'game':v['next_game'],'threshold':t,'data_cutoff':now(),'model_version':'minutes-rate-v1'}
+                           'game':v['next_game'],'threshold':t,'data_cutoff':now(),'model_version':VERSION}
                 db.execute('INSERT INTO forecasts(mode,player_id,event_id,created_at,payload) VALUES (?,?,?,?,?)',(m,p['id'],v['next_game']['id'],now(),json.dumps(payload)))
                 count += 1
             db.commit()
@@ -351,7 +352,7 @@ def create_app(db_path=None):
                     prob=f['probabilities']
                     facts.append({'text':f"For the {t} points threshold, the statistical model gives below {prob['below']:.1%}, above {prob['above']:.1%}, exactly {prob['exactly']:.1%}, conditional on appearing.",'source_url':None})
                 recent = sorted(records(db,mode(db),'logs',pid), key=lambda g:instant(g['game_at']), reverse=True)
-                for g in [g for g in recent if g['appeared']][:3]:
+                for g in eligible(recent,now())[-3:][::-1]:
                     facts.append({'text':f"Recorded appearance {g['game_at'][:10]}: {g['points']} points in {g['minutes']} minutes.",'source_url':g.get('source_url')})
             else:
                 source = next((n['source_url'] for n in v['availability']['reports'] if n['confirmed'] and n['status']=='out'),None) if v['availability']['status']=='out' else None
