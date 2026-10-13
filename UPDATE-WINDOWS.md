@@ -29,3 +29,7 @@ Scrolling dependency-install messages are normal. The final command stays runnin
 5. Enter a threshold such as **22.5** on the dashboard, click **Apply**, then open a player. The calendar panel shows historical below/above/tie frequencies, clearly separate from model probabilities.
 
 Public news and injury reports include source links, publication dates and retrieval dates. An “undisclosed” injury appears only when publicly reported. Old or missing reports do not establish current availability. It is legitimate for a player to have historical logs but no upcoming game in the loaded schedule. Calendar averages are descriptive; they do not change forecasts or demonstrate betting profit.
+
+## If Use my data looks blank
+
+The updated dashboard shows GAME LOGS and RECENT AVG separately from next-game forecasts. The banner reports how many real logs are loaded. Click a player to see Recent game log and the calendar chart. If those logs exist but future projections are dashes, there is no upcoming game in the loaded schedule or the player is ruled out; historical imports are not missing. Load schedules with Refresh sources when available, without inventing fixtures. If Recent game log says No game logs imported, copy the result message from the history import into chat; an HTTP 200 alone can include an empty result, and the imported count must be checked. If rows tell you to restart for counts, stop and restart the Python app and press Ctrl+F5: the browser was serving newer scripts against an older running server. Do not delete the data folder.

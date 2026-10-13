@@ -68,6 +68,20 @@ def test_invalid_import_atomic_and_threshold(client):
     assert client.get('/api/player/aja-wilson').get_json()['logs']==[]
     assert client.get('/api/dashboard?threshold=nan').status_code==400
 
+def test_imported_history_is_visible_without_upcoming_game(client):
+    at=datetime.now(timezone.utc)
+    rows=[{'player_id':'aja-wilson','id':str(i),'game_at':(at-timedelta(days=40-i)).isoformat(),
+           'available_at':(at-timedelta(days=40-i,hours=-3)).isoformat(), 'minutes':30,'points':20+i%3,
+           'appeared':'true','source_url':'https://example.com/test-history'} for i in range(30)]
+    assert client.post('/api/import/logs',data=csvfile(rows),headers=HEAD).status_code==200
+    assert client.post('/api/mode',json={'mode':'live'},headers=HEAD).status_code==200
+    p=next(p for p in client.get('/api/dashboard').get_json()['players'] if p['id']=='aja-wilson')
+    assert p['log_count']==30 and p['appearance_count']==30
+    assert p['recent_average']==21.2 and p['recent_sample']==5
+    assert p['forecast'] is None and p['next_game'] is None
+    assert p['availability']['status']=='unknown'
+    assert len(client.get('/api/player/aja-wilson').get_json()['logs'])==30
+
 def test_sourced_out_conflicts_and_staleness(client):
     at=datetime.now(timezone.utc)
     base={'id':'n1','player_id':'aja-wilson','published_at':(at-timedelta(hours=2)).isoformat(),'status':'out','confirmed':True,'title':'Team statement','text':'Public report','source_url':'https://www.wnba.com/report','retrieved_at':at.isoformat(),'minutes_cap':None}

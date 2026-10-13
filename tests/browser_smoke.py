@@ -110,6 +110,11 @@ with tempfile.TemporaryDirectory() as temporary:
             page.set_input_files('#import-form input[type=file]',{'name':'logs.csv','mimeType':'text/csv','buffer':contents(rows)})
             page.locator('#import-form button').click()
             page.wait_for_function("document.querySelector('#import-result').textContent.includes('Imported 30')")
+            page.wait_for_function("document.querySelector('#history-overview').textContent.includes('30 real game logs loaded')")
+            assert '30 real game logs loaded' in page.locator('#history-overview').text_content()
+            assert page.locator('.history-count').first.inner_text().startswith('30')
+            assert page.locator('.history-average').first.inner_text().startswith('23.0')
+            assert page.locator('.points').count()==0
             page.select_option('#import-kind','schedule')
             scheduled=[{'player_id':'aja-wilson','id':'browser-next','game_at':(at+timedelta(days=1)).isoformat(),'opponent':'Browser fixture opponent','home':'true','source_url':'https://example.com/browser-test-fixture'}]
             page.set_input_files('#import-form input[type=file]',{'name':'schedule.csv','mimeType':'text/csv','buffer':contents(scheduled)})

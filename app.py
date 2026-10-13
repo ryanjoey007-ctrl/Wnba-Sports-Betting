@@ -6,7 +6,7 @@ import uuid
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, render_template, Response
-from model import forecast, evaluate, instant
+from model import forecast, evaluate, instant, eligible
 from calendar_stats import calendar_summary
 from store import connect, seed_demo, records, now
 from ingest import import_csv, KINDS, refresh, refresh_news, load_history, ImportControl, ImportCancelled
@@ -78,6 +78,8 @@ def create_app(db_path=None):
         pid = player['id']
         at = now()
         logs = records(db, data_mode, 'logs', pid)
+        appearances=eligible(logs,at)
+        recent=appearances[-5:]
         schedules = sorted([s for s in records(db,data_mode,'schedule',pid) if instant(s['game_at']) > instant(at)], key=lambda s:instant(s['game_at']))
         game = schedules[0] if schedules else None
         news = records(db,data_mode,'news',pid)
@@ -88,6 +90,9 @@ def create_app(db_path=None):
         latest_stat = max([l['game_at'] for l in logs if l['appeared']], key=instant, default=None)
         stats_stale = latest_stat is None or instant(at)-instant(latest_stat)>timedelta(days=14)
         return {**dict(player),'next_game':game,'availability':a,'forecast':f,'last_updated':last,
+                'log_count':len(logs),'appearance_count':len(appearances),
+                'recent_average':round(sum(g['points'] for g in recent)/len(recent),2) if recent else None,
+                'recent_sample':len(recent),'latest_appearance':appearances[-1]['game_at'] if appearances else None,
                 'stale':stale,'stats_stale':stats_stale,'mode':data_mode,
                 'reason': 'Ruled out — forecast suppressed' if a['status']=='out' else 'No scheduled game' if not game else 'Need at least five eligible appearances' if not f else None}
 
