@@ -7,19 +7,21 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, render_template, Response
 from model import forecast, evaluate, instant
+from calendar_stats import calendar_summary
 from store import connect, seed_demo, records, now
-from ingest import import_csv, KINDS, refresh
+from ingest import import_csv, KINDS, refresh, refresh_news, load_history
 
 def availability(news, cutoff):
     eligible = sorted([n for n in news if instant(n['published_at']) <= instant(cutoff) and instant(n['retrieved_at']) <= instant(cutoff)], key=lambda n: instant(n['published_at']), reverse=True)
-    fresh = [n for n in eligible if instant(cutoff)-instant(n['published_at']) <= timedelta(hours=48)]
+    status_reports = [n for n in eligible if n.get('report_kind')!='article']
+    fresh = [n for n in status_reports if instant(cutoff)-instant(n['published_at']) <= timedelta(hours=48)]
     confirmed = [n for n in fresh if n['confirmed'] and n['status'] != 'unknown']
     # Conservative conflict handling: fresh contradictory reports need human resolution.
     statuses = {n['status'] for n in confirmed}
     conflict = len(statuses)>1
     status = 'unknown' if conflict or not confirmed else confirmed[0]['status']
     caps = [n['minutes_cap'] for n in confirmed if n.get('minutes_cap') is not None]
-    return {'status':status, 'conflict':conflict, 'stale':bool(eligible) and not fresh,
+    return {'status':status, 'conflict':conflict, 'stale':bool(status_reports) and not fresh,
             'reports':eligible, 'minutes_cap':min(caps) if caps and not conflict else None}
 
 def create_app(db_path=None):
@@ -87,7 +89,7 @@ def create_app(db_path=None):
             m = mode(db)
             players = [player_view(db,p,m,threshold()) for p in db.execute('SELECT * FROM players WHERE tracked=1 ORDER BY rowid')]
             settings = dict(db.execute('SELECT key,value FROM settings').fetchall())
-        return jsonify(players=players,mode=m,updated_at=now(),last_refresh=settings.get('last_refresh'),refresh_error=settings.get('refresh_error'),ai_enabled=bool(os.getenv('LLM_API_KEY')))
+        return jsonify(players=players,mode=m,updated_at=now(),last_refresh=settings.get('last_refresh'),refresh_error=settings.get('refresh_error'),news_refresh_error=settings.get('news_refresh_error'),last_news_refresh=settings.get('last_news_refresh'),ai_enabled=bool(os.getenv('LLM_API_KEY')))
 
     @app.get('/api/players')
     def players():
@@ -138,6 +140,7 @@ def create_app(db_path=None):
             result = player_view(db,p,m,t)
             logs = sorted(records(db,m,'logs',pid), key=lambda l:instant(l['game_at']))
             result['logs'] = logs
+            result['calendar'] = calendar_summary(logs,now(),t,next_game_at=result['next_game']['game_at'] if result['next_game'] else None)
             result['evaluation'] = evaluate(logs,t)
             result['team_stats'] = records(db,m,'team_stats',pid)
             history = []
@@ -149,6 +152,53 @@ def create_app(db_path=None):
                                 'outcome':'appeared' if game and game['appeared'] else 'missed' if game else 'pending'})
             result['history'] = history
         return jsonify(result)
+
+    @app.get('/api/player/<pid>/calendar')
+    def calendar(pid):
+        value=request.args.get('season','all')
+        if value=='all':
+            season=None
+        else:
+            try:
+                season=int(value)
+            except ValueError as exc:
+                raise ValueError('Season must be a year or all.') from exc
+            if not 1997<=season<=datetime.now(timezone.utc).year:
+                raise ValueError('Season is outside the WNBA history range.')
+        with db_open() as db:
+            p=db.execute('SELECT * FROM players WHERE id=?',(pid,)).fetchone()
+            if not p:
+                return jsonify(error='Player not found.'),404
+            m=mode(db)
+            view=player_view(db,p,m)
+            return jsonify(calendar_summary(records(db,m,'logs',pid),now(),threshold(),season,
+                                            view['next_game']['game_at'] if view['next_game'] else None))
+
+    @app.post('/api/news/refresh')
+    def news_refresh():
+        try:
+            with db_open() as db:
+                result=refresh_news(db)
+            return jsonify(result)
+        except Exception as exc:
+            message=f'ESPN public news/injury refresh failed ({type(exc).__name__}). Cached reports are retained; missing reports do not establish availability. Try CSV import if access remains blocked.'
+            with db_open() as db:
+                db.execute("INSERT OR REPLACE INTO settings VALUES ('news_refresh_error',?)",(message,))
+                db.commit()
+            return jsonify(error=message),502
+
+    @app.post('/api/history/load')
+    def history_load():
+        year=datetime.now(timezone.utc).year
+        years=(request.get_json(silent=True) or {}).get('seasons',[year-2,year-1,year])
+        if not isinstance(years,list) or not 1<=len(years)<=5 or any(type(y) is not int or not 1997<=y<=year for y in years):
+            raise ValueError('Choose one to five seasons between 1997 and the current year.')
+        try:
+            with db_open() as db:
+                result=load_history(db,sorted(set(years)))
+            return jsonify(result)
+        except Exception as exc:
+            return jsonify(error=f'ESPN game-log import failed ({type(exc).__name__}). Existing game snapshots are unchanged. Use CSV import if access remains blocked.'),502
 
     @app.post('/api/forecasts')
     def save_forecasts():
@@ -225,7 +275,9 @@ def create_app(db_path=None):
             t = data.get('threshold')
             t = None if t in ('',None) else number(t,0,200)
             v = player_view(db,p,mode(db),t)
-            facts = []
+            a=v['availability']
+            status_source=next((n['source_url'] for n in a['reports'] if n['confirmed'] and n['status']==a['status']),None) if a['status']!='unknown' else None
+            facts = [{'text':f"Current availability status: {a['status']}. This is separate from the conditional scoring forecast. Old reports, absent listings and general news do not establish current clearance.",'source_url':status_source}]
             f = v['forecast']
             if f:
                 facts.append({'text':f"Expected points: {f['expected_points']}; minutes: {f['projected_minutes']}; points/minute: {f['points_per_minute']}. 80% interval: {f['interval'][0]}–{f['interval'][1]}, conditional on appearing.",'source_url':None})
@@ -239,8 +291,9 @@ def create_app(db_path=None):
             else:
                 source = next((n['source_url'] for n in v['availability']['reports'] if n['confirmed'] and n['status']=='out'),None) if v['availability']['status']=='out' else None
                 facts.append({'text':v['reason'],'source_url':source})
-            for n in v['availability']['reports'][:5]:
-                facts.append({'text':f"{'Confirmed' if n['confirmed'] else 'Unconfirmed'} report, published {n['published_at']}: {n['title']}. {n['text']}",'source_url':n['source_url']})
+            for n in v['availability']['reports']:
+                label='Public article; availability not inferred' if n.get('report_kind')=='article' else 'Confirmed public report' if n['confirmed'] else 'Unconfirmed report'
+                facts.append({'text':f"{label}, published {n['published_at']}: {n['title']}. {n['text']}",'source_url':n['source_url']})
             if v['availability']['conflict']:
                 facts.append({'text':'Fresh confirmed reports conflict. Availability is unknown until they are resolved.','source_url':None})
             snapshots = db.execute('SELECT payload FROM forecasts WHERE mode=? AND player_id=? ORDER BY id DESC LIMIT 1',(mode(db),pid)).fetchone()
@@ -264,8 +317,10 @@ def create_app(db_path=None):
                 selected = list(dict.fromkeys(i for i in ids if type(i) is int and 0<=i<len(facts)))
                 if not selected:
                     raise ValueError('No valid evidence')
+                if 0 not in selected:
+                    selected.insert(0,0)
                 # Always retain all sourced availability reports to expose conflict.
-                selected += [i for i,fact in enumerate(facts) if 'report, published' in fact['text'] and i not in selected]
+                selected += [i for i,fact in enumerate(facts) if ', published' in fact['text'] and i not in selected]
                 ai_mode = 'AI-assisted evidence selection · verified stored facts'
             except Exception:
                 warning = 'AI service unavailable. Showing stored facts instead.'

@@ -1,0 +1,18 @@
+.calendar-panel { min-width: 0; }
+.calendar-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; margin: 14px 0 20px; font-size: 12px; color: var(--muted); }
+.calendar-controls label { display: flex; align-items: center; gap: 8px; }
+.calendar-controls select { font: inherit; padding: 9px; background: white; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); }
+.calendar-scroll { width: 100%; overflow-x: auto; }
+.calendar-chart { display: block; width: 100%; min-width: 700px; }
+.calendar-day-card { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; background: #f5f8f1; border: 1px solid var(--line); border-radius: 8px; padding: 20px; margin: 20px 0; }
+.calendar-day-card strong { font-size: 17px; font-weight: 600; }
+.calendar-day-card p { margin-bottom: 0; }
+.calendar-panel details { margin-top: 18px; }
+.calendar-panel summary { font-size: 12px; cursor: pointer; color: var(--green); line-height: 1.8; }
+.source-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.news-timeline { max-height: 480px; overflow-y: auto; margin-top: 12px; }
+@media(max-width: 800px) {
+  .calendar-day-card { grid-template-columns: 1fr; }
+  .calendar-panel .legend { flex-wrap: wrap; line-height: 1.6; }
+  .news-timeline { max-height: 420px; }
+}

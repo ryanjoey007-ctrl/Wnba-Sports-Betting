@@ -29,23 +29,38 @@ The browser test starts a temporary server with an isolated database. It exercis
 | --- | --- |
 | Synthetic demo | Working; reproducible fake game logs across two years, fake future fixtures and fake public reports. All clearly labelled. Nothing is a real basketball fact. |
 | CSV logs / schedules / public reports / team statistics | Working, validated and tested; user-supplied source URLs and publication times. Source authenticity and the truth of a report are the importer's responsibility. |
-| ESPN roster and schedule adapter | Implemented; fixture-tested. Direct requests were rejected with HTTP proxy 403 in the build environment. Not verified with live responses. A successful refresh populates only real-data tables. |
-| ESPN historical box scores | Implemented through scoreboard + event summary; fixture coverage is partial and live responses are unverified. Supports bounded historical fetches; CSV supports multiple seasons. |
-| Live injury or minutes-restriction feed | Not implemented or independently verified. Import public team announcements / reporting with source links. No invented or inferred injuries. |
+| ESPN roster and schedule adapter | Verified against live responses on 13 October 2026. All five player IDs resolved; no next-14-day game was returned for those players during that check. Only real-data tables are populated. |
+| ESPN historical game logs | Verified live: 662 regular/postseason game logs for the five players across 2024–2026. The new three-season loader uses the common game-log API and excludes All-Star games. The separate scoreboard/event-summary fallback remains fixture-tested. |
+| Public ESPN news / injury feed | Verified live: 28 relevant article/report snapshots. Article matching uses athlete IDs or full names because the upstream player query is ignored. Structured public injury status is used conservatively; source publication dates and links are retained. General news never implies clearance. Minutes caps still require a confirmed CSV report. |
 | AI | Optional OpenAI evidence selection; requires a server-side key and network access. No live AI call was verified. Without credentials, stored-facts answers work. |
 
-Candidate public ESPN API URLs used by the adapter:
+Public ESPN API URLs used by the adapters:
 
 - `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams`
 - `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/{team_id}/roster`
 - `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=YYYYMMDD`
 - `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event={event_id}`
+- `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/news?limit=100`
+- `https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/injuries?limit=100`
+- `https://site.web.api.espn.com/apis/common/v3/sports/basketball/wnba/athletes/{athlete_id}/gamelog?season={year}`
 
 These public endpoints are unofficial and may change or disallow access. No credential requirement has been established; no access-control bypass is attempted. Retries use normal verified HTTPS. Current roster matches resolve the stable internal player ID to an ESPN athlete/team ID; unmatched or traded historical identities need manual CSV records. Imported IDs stay stable when watchlists change. No numerical IDs are fabricated. Missing schedule means **no scheduled game in the loaded data**, not proof the league has no game.
 
 For actual CSV source research, use the league's official game-center / player statistics and published team announcements, or licensed data exports you can access. If an export requires your credentials, obtain it from that provider's own UI and import the CSV locally; do not send credentials in chat. This project has not verified a licensed provider or claimed access to its feed. Team/opponent statistics can be imported with citations, but are not used for model adjustments without validation.
 
-In cloud environment settings, the saved custom domains are `site.api.espn.com`, `site.web.api.espn.com` (candidate game-log API), and `api.openai.com` (optional AI), preserving package-manager presets. Saving the draft does not apply networking to the running machine. Review/save/publish through environment settings, then retry. A successful future request is needed before claiming live support. No new publication has been verified.
+In cloud environment settings, the saved custom domains are `site.api.espn.com`, `site.web.api.espn.com` (game logs), and `api.openai.com` (optional AI), preserving package-manager presets. Live ESPN requests succeeded on 13 October 2026; they were blocked during the initial build. Availability can differ on your machine or after policy changes. Saving a draft does not apply or publish it; review/save/publish through environment settings separately. No new cloud publication has been verified.
+
+## Real-data buttons and calendar-day chart
+
+Open **Data & sources → Load last 3 seasons of real logs**, then choose **Use my data**. The loader defaults to the current year and preceding two years, gets regular/postseason appearance records, skips All-Star/preseason and future events, and never overwrites an earlier game snapshot. **Refresh ESPN news & reports** loads relevant public articles and structured injury reports. **Refresh sources** also fetches upcoming schedules and attempts a news refresh; if news alone fails, it retains the successful schedule refresh and displays the warning. An absent upcoming game is not filled in with a fake fixture.
+
+Each player's **Scoring by day of the month** chart has 31 calendar-day buckets using Australia/Sydney, with an all-season/year filter, average points, observed range, sample sizes and source-linked underlying appearances. Missing days have no average; missed appearances are excluded. Fewer than five appearances is visibly flagged. The highlighted day defaults to the next loaded game's Sydney date, or today's date if no fixture is loaded. With a user threshold, it shows **historical observed frequencies**, not future probabilities or a recommended bet.
+
+Calendar dates never enter the numerical forecasting model or imply private health conditions. Calendar differences can reflect opponent, minutes, season, role, schedule or chance. The diagnostic compares earlier same-date averages with recent-five and the current model on identical chronological targets, requiring five earlier same-date appearances per target and at least 20 targets for even an exploratory result. All inputs must have been published before the target. The live retrospective import gave zero eligible historical calendar tests because those snapshots were first retrieved now; it cannot establish predictive improvement. A lower descriptive average does not establish a profitable under bet. No odds or ROI are calculated.
+
+The public injury feed lacks athlete.id but includes verified player-card links; stable IDs are resolved from those links rather than guessed from names. Each article revision and changed injury report is retained as a separate snapshot. The feed's original injury report date is used, not the new fetch date, so refreshing does not resurrect an old report as current. Reports older than 48 hours do not set present status. Fresh contradictory status reports yield unknown. Unfamiliar status is not inferred. Public article headlines/excerpts do not set availability, and roster Active status is not treated as clearance. An undisclosed injury is displayed only when a source explicitly reports one; no undisclosed detail is invented. Source injury descriptions are attributed to ESPN, not independently medically verified. Read the dated source before relying on a status; this feed can be incomplete or stale. Public confirmed minutes restrictions can still be imported with citations.
+
+A Windows update guide is in [UPDATE-WINDOWS.md](UPDATE-WINDOWS.md). The new backend uses pinned `tzdata` so Sydney time works on Windows as well as Linux.
 
 ## CSV imports
 
@@ -131,4 +146,4 @@ The computer/host must be running. Use a persistent volume for SQLite. An offlin
 
 ## Architecture
 
-`model.py`: pure statistical model and chronological evaluation. `store.py`: SQLite persistence and labelled demo generation. `ingest.py`: strict CSV ingestion and public API adapter. `app.py`: Flask routes, grounded Q&A and optional in-process scheduler. `manage.py`: runnable scheduling CLI. `static/` and `templates/`: responsive UI, SVG chart, loading/error/empty states. Tests exercise leakage, distribution partitioning, imports, statuses, stable identities, history preservation and browser workflows.
+`calendar_stats.py`: descriptive Sydney calendar-day averages and matched chronological comparisons, never scoring-model features. `model.py`: pure statistical model and chronological evaluation. `store.py`: SQLite persistence and labelled demo generation. `ingest.py`: strict CSV ingestion and public API adapter. `app.py`: Flask routes, grounded Q&A and optional in-process scheduler. `manage.py`: runnable scheduling CLI. `static/` and `templates/`: responsive UI, SVG chart, loading/error/empty states. Tests exercise leakage, distribution partitioning, imports, statuses, stable identities, history preservation and browser workflows.

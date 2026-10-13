@@ -49,10 +49,14 @@ Open the local address printed by the server and keep the terminal open. Stop wi
 
 ## When you want real data
 
-Click **Use my data**. This workspace starts empty; it never silently uses the demo records.
-Click **Data & sources** for CSV templates and the player IDs used by imports. Import historical logs and an upcoming schedule; at least five recorded appearances are needed for a forecast. Import a publicly sourced news report if you have one. Unknown availability stays unknown.
+1. Open **Data & sources** and click **Load last 3 seasons of real logs**. Wait for the result; several public requests are needed.
+2. Close the dialog and click **Use my data**. Real records are separate from fictional demo records.
+3. Open **Data & sources** again and click **Refresh ESPN news & reports**. Or use **Refresh sources** on the dashboard to fetch schedules and attempt a news refresh together.
+4. Click a player to view the calendar-day averages and public news. Choose a year or a day of the month in the chart controls. Apply a points threshold on the dashboard to see historical below/above/tie counts on the detail page.
 
-The **Refresh sources** button attempts a public ESPN schedule update. Live access was blocked in the build environment, so this adapter is not verified against live ESPN responses. It can fail on your machine too. CSV import is tested and works without external access. See `README.md` for exact CSV fields and source limitations.
+Live ESPN access was verified on 13 October 2026, but these public endpoints can change or be blocked on your machine. CSV import remains available in **Data & sources** with templates and player IDs. At least five appearances and a future scheduled game are needed for a scoring forecast. A loaded calendar chart can exist without a future game. Old injury reports are still shown with their dates, while current availability stays unknown. Historical averages do not prove a profitable strategy, and calendar dates do not change the model.
+
+For an existing installation, follow [UPDATE-WINDOWS.md](UPDATE-WINDOWS.md) before trying these new buttons.
 
 The question box works without AI credentials using stored facts. Optional AI selects relevant evidence after a server-side key is configured. No key is required to use the numerical model.
 

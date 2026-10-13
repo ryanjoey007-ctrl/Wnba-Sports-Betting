@@ -7,11 +7,13 @@ import re
 import urllib.request
 import urllib.parse
 import unicodedata
+import hashlib
 from datetime import datetime, timedelta, timezone
 from model import instant
 from store import now, put
 
 BASE = 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba'
+GAMELOG_BASE = 'https://site.web.api.espn.com/apis/common/v3/sports/basketball/wnba/athletes'
 KINDS = {'logs': ['player_id','id','game_at','available_at','minutes','points','appeared','source_url'],
          'schedule': ['player_id','id','game_at','opponent','home','source_url'],
          'news': ['player_id','id','published_at','title','text','status','confirmed','source_url'],
@@ -108,12 +110,8 @@ def fetch(url):
 def normalize(name):
     return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKD', name).lower())
 
-def refresh(db, history_days=0):
-    """No injury inference: availability is sourced via manual report imports only.
-
-    Boxscores use retrieval time for available_at; this deliberately prevents
-    retrospectively fetched final statistics leaking into historical backtests.
-    """
+def resolve_players(db):
+    """Resolve identities from public roster IDs without collecting personal data."""
     tracked = list(db.execute('SELECT * FROM players WHERE tracked=1'))
     teams = fetch(BASE+'/teams')['sports'][0]['leagues'][0]['teams']
     identity = {}
@@ -129,10 +127,169 @@ def refresh(db, history_days=0):
     for player in tracked:
         match = identity.get(normalize(player['name']))
         if match:
-            db.execute('UPDATE players SET espn_id=?,team_id=? WHERE id=?', (*match,player['id']))
             matched.append((dict(player), *match))
     if not matched:
         raise ValueError('No tracked players matched current ESPN rosters. Import stable IDs via CSV instead.')
+    return matched, [p['name'] for p in tracked if not identity.get(normalize(p['name']))]
+
+def persist_identities(db, matched):
+    # Acquire the SQLite write lock after network requests, keeping reads responsive.
+    for player,aid,tid in matched:
+        db.execute('UPDATE players SET espn_id=?,team_id=? WHERE id=?',(aid,tid,player['id']))
+
+def linked_athlete_id(athlete):
+    if athlete.get('id'):
+        return str(athlete['id'])
+    # The verified public injury feed omits athlete.id but includes player links.
+    for link in athlete.get('links',[]):
+        parsed=urllib.parse.urlsplit(link.get('href',''))
+        if parsed.hostname in ('www.espn.com','espn.com'):
+            match=re.search(r'/player/(?:[a-z]+/)?_/id/(\d+)(?:/|$)',parsed.path)
+            if match:
+                return match[1]
+    return None
+
+def news_matches(article, player, espn_id):
+    # The upstream athlete query parameter was verified to be ignored.
+    tagged = any(str(c.get('athleteId',c.get('athlete',{}).get('id','')))==espn_id
+                 for c in article.get('categories',[]) if c.get('type')=='athlete')
+    named = normalize(player['name']) in normalize(article.get('headline','')+' '+article.get('description',''))
+    return tagged or named
+
+def news_records(matched, articles, injury_groups, timestamp):
+    output=[]
+    skipped=0
+    for player,aid,tid in matched:
+        for article in articles:
+            if not news_matches(article,player,aid):
+                continue
+            try:
+                published=article['published']
+                modified=article.get('lastModified',published)
+                if instant(published)>instant(timestamp) or instant(modified)>instant(timestamp):
+                    raise ValueError('Future report')
+                url=source_url(article['links']['web']['href'])
+                if urllib.parse.urlsplit(url).hostname not in ('www.espn.com','espn.com'):
+                    raise ValueError('Unexpected article source')
+                ident=f"espn-article-{article['id']}-{modified}"
+                payload={'id':ident,'published_at':published,'source_modified_at':modified,'retrieved_at':timestamp,
+                         'source_url':url,'feed_url':BASE+'/news?limit=100','provider':'ESPN','report_kind':'article',
+                         'title':article['headline'],'text':article.get('description',''),
+                         'status':'unknown','confirmed':False,'minutes_cap':None}
+                output.append((player['id'],ident,payload))
+            except (ValueError,KeyError,TypeError):
+                skipped+=1
+        for group in injury_groups:
+            for injury in group.get('injuries',[]):
+                if linked_athlete_id(injury.get('athlete',{}))!=aid:
+                    continue
+                try:
+                    published=injury['date']
+                    if instant(published)>instant(timestamp):
+                        raise ValueError('Future report')
+                    raw_status=injury.get('status','')
+                    status={'out':'out','doubtful':'questionable','questionable':'questionable',
+                            'day-to-day':'questionable','probable':'questionable','available':'available',
+                            'active':'available'}.get(raw_status.casefold(),'unknown')
+                    # Public basketball injury descriptions only. No extrapolation.
+                    text=injury.get('longComment') or injury.get('shortComment') or 'No public detail supplied.'
+                    injury_type=injury.get('details',{}).get('type')
+                    # Preserve revisions even if ESPN reuses its report ID/date.
+                    digest=hashlib.sha256(json.dumps({'text':text,'status':raw_status,'type':injury_type},sort_keys=True).encode()).hexdigest()[:12]
+                    ident=f"espn-injury-{injury['id']}-{published}-{digest}"
+                    payload={'id':ident,'published_at':published,'retrieved_at':timestamp,
+                             'source_url':BASE+'/injuries?limit=100','provider':'ESPN','report_kind':'injury',
+                             'title':f"ESPN report: {player['name']} — {raw_status or 'status unknown'}",
+                             'text':text,'status':status,'reported_status':raw_status,
+                             'injury_type':injury_type,'confirmed':status!='unknown','minutes_cap':None}
+                    output.append((player['id'],ident,payload))
+                except (ValueError,KeyError,TypeError):
+                    skipped+=1
+    return output,skipped
+
+def refresh_news(db, matched=None):
+    if matched is None:
+        matched,unmatched=resolve_players(db)
+    else:
+        unmatched=[]
+    timestamp=now()
+    article_feed=fetch(BASE+'/news?limit=100')
+    injury_feed=fetch(BASE+'/injuries?limit=100')
+    if not isinstance(article_feed.get('articles'),list) or not isinstance(injury_feed.get('injuries'),list):
+        raise ValueError('Unexpected public news response')
+    items,skipped=news_records(matched,article_feed['articles'],injury_feed['injuries'],timestamp)
+    persist_identities(db,matched)
+    added=0
+    for pid,ident,payload in items:
+        if not db.execute("SELECT 1 FROM records WHERE mode='live' AND kind='news' AND player_id=? AND record_id=?",(pid,ident)).fetchone():
+            put(db,'live','news',pid,ident,payload)
+            added+=1
+    db.execute("INSERT OR REPLACE INTO settings VALUES ('last_news_refresh',?)",(timestamp,))
+    db.execute("DELETE FROM settings WHERE key='news_refresh_error'")
+    db.commit()
+    return {'reports':added,'matched_players':len(matched),'unmatched':unmatched,'skipped_reports':skipped,'retrieved_at':timestamp}
+
+def parse_gamelog(data, timestamp, season, url):
+    if not isinstance(data.get('seasonTypes'),list) or not isinstance(data.get('events'),dict):
+        raise ValueError('Unexpected game-log response')
+    labels=[s.upper() for s in data.get('labels',[])]
+    if 'MIN' not in labels or 'PTS' not in labels:
+        raise ValueError('Game logs missing scoring columns')
+    rows={}
+    skipped=0
+    for period in data['seasonTypes']:
+        period_name=period.get('displayName','').lower()
+        if 'regular season' not in period_name and 'postseason' not in period_name:
+            continue
+        for category in period.get('categories',[]):
+            for entry in category.get('events',[]):
+                try:
+                    ident=str(entry['eventId'])
+                    event=data['events'][ident]
+                    if event.get('isAllStar'):
+                        continue
+                    start=event['gameDate']
+                    if instant(start)>=instant(timestamp):
+                        continue
+                    stats=dict(zip(labels,entry['stats']))
+                    parts=stats['MIN'].split(':')
+                    minutes=number(parts[0],0,70)+(number(parts[1],0,59)/60 if len(parts)==2 else 0)
+                    points=number(stats['PTS'],0,150,True)
+                    if minutes==0 and points:
+                        raise ValueError('Scoring with no minutes')
+                    rows[ident]={'id':ident,'game_at':start,'available_at':timestamp,'retrieved_at':timestamp,
+                                 'source_url':url,'minutes':minutes,'points':points,'appeared':minutes>0,
+                                 'opponent':event.get('opponent',{}).get('displayName','Unknown'),
+                                 'home':event.get('atVs')=='vs','season':season,
+                                 'season_type':'postseason' if 'postseason' in period_name else 'regular'}
+                except (ValueError,KeyError,TypeError):
+                    skipped+=1
+    return list(rows.values()),skipped
+
+def load_history(db, seasons):
+    matched,unmatched=resolve_players(db)
+    timestamp=now()
+    rows=[]
+    skipped=0
+    for player,aid,tid in matched:
+        for season in seasons:
+            url=f'{GAMELOG_BASE}/{aid}/gamelog?season={season}'
+            parsed,missing=parse_gamelog(fetch(url),timestamp,season,url)
+            skipped+=missing
+            rows.extend((player['id'],r) for r in parsed)
+    added=0
+    persist_identities(db,matched)
+    for pid,r in rows:
+        if not db.execute("SELECT 1 FROM records WHERE mode='live' AND kind='logs' AND player_id=? AND record_id=?",(pid,r['id'])).fetchone():
+            put(db,'live','logs',pid,r['id'],r)
+            added+=1
+    db.execute("INSERT OR REPLACE INTO settings VALUES ('last_history_refresh',?)",(timestamp,))
+    db.commit()
+    return {'records':added,'matched_players':len(matched),'unmatched':unmatched,'seasons':seasons,'skipped_rows':skipped,'retrieved_at':timestamp}
+
+def refresh(db, history_days=0):
+    """Game snapshots use retrieval times; public injury records retain report times."""
+    matched,unmatched=resolve_players(db)
     timestamp = now()
     count = 0
     # Build new schedule first; replace only after all required requests succeed.
@@ -173,6 +330,7 @@ def refresh(db, history_days=0):
                                     points = int(stats['PTS'])
                                     appeared = minutes > 0
                                 logs.append((p['id'],event['id'],{'id':event['id'],'game_at':event['date'],'available_at':timestamp,'retrieved_at':timestamp,'source_url':summary_url,'minutes':minutes,'points':points,'appeared':appeared,'opponent':next(c['team']['displayName'] for c in competitors if str(c['team']['id'])!=tid)}))
+    persist_identities(db,matched)
     for p,aid,tid in matched:
         # Preserve user-imported schedule records; replace only the ESPN cache.
         for r in db.execute("SELECT record_id,payload FROM records WHERE mode='live' AND kind='schedule' AND player_id=?", (p['id'],)).fetchall():
@@ -188,4 +346,12 @@ def refresh(db, history_days=0):
             count += 1
     db.execute("INSERT OR REPLACE INTO settings VALUES ('last_refresh',?)", (timestamp,))
     db.commit()
-    return {'records':count, 'matched_players':len(matched), 'unmatched':[p['name'] for p in tracked if not identity.get(normalize(p['name']))], 'retrieved_at':timestamp}
+    result={'records':count, 'matched_players':len(matched), 'unmatched':unmatched, 'retrieved_at':timestamp}
+    try:
+        result['news']=refresh_news(db,matched)
+    except Exception:
+        warning='Public ESPN news/injury refresh failed. Earlier reports are retained and still checked for staleness. No missing report implies an injury or clearance.'
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('news_refresh_error',?)",(warning,))
+        db.commit()
+        result['news_warning']=warning
+    return result

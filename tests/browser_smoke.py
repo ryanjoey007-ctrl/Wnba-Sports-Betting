@@ -63,6 +63,16 @@ with tempfile.TemporaryDirectory() as temporary:
             page.locator('.player-name').first.click()
             page.wait_for_selector('#ask-form')
             assert page.locator('svg.chart').count()==1
+            assert page.locator('svg.calendar-chart').count()==1
+            assert page.locator('#calendar-day option').count()==31
+            page.select_option('#calendar-day','13')
+            assert 'CALENDAR DAY 13' in page.locator('#calendar-selected').inner_text()
+            assert 'Observed frequencies, not forecast probabilities' in page.locator('#calendar-selected').inner_text() or 'No recorded appearances' in page.locator('#calendar-selected').inner_text()
+            last_season=page.locator('#calendar-season option').nth(1).get_attribute('value')
+            page.select_option('#calendar-season',last_season)
+            page.wait_for_function("!document.querySelector('#calendar-season').disabled")
+            assert page.locator('#calendar-season').input_value()==last_season
+            assert 'Descriptive history' in page.locator('.calendar-panel').inner_text()
             assert 'SYNTHETIC RESULTS' in page.locator('#detail').inner_text()
             assert 'Threshold 22.5' in page.locator('#detail').inner_text()
             assert 'Above-threshold calibration' in page.locator('#detail').inner_text()
@@ -98,6 +108,15 @@ with tempfile.TemporaryDirectory() as temporary:
             page.wait_for_selector('#ask-form')
             assert 'TIMESTAMP-ELIGIBLE STATS' in page.locator('#detail').inner_text()
             assert 'Browser fixture opponent' in page.locator('#detail').inner_text()
+            assert 'RECORDED APPEARANCES' in page.locator('.calendar-panel').inner_text()
+            page.route('**/api/news/refresh',lambda route:route.fulfill(status=502,content_type='application/json',body='{"error":"Public ESPN feed unavailable in browser fixture; cache retained."}'))
+            page.click('#player-news-refresh')
+            page.wait_for_function("document.querySelector('#notice').textContent.includes('Public ESPN feed unavailable')")
+            assert page.locator('svg.calendar-chart').count()==1
+            page.set_viewport_size({'width':390,'height':844})
+            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+            assert page.locator('.calendar-scroll').evaluate('(el)=>el.scrollWidth>el.clientWidth')
+            page.set_viewport_size({'width':1440,'height':1000})
             page.goto(base)
             page.wait_for_selector('.player-name')
             page.click('#switch-mode')
@@ -112,6 +131,6 @@ with tempfile.TemporaryDirectory() as temporary:
             page.screenshot(path=str(output/'dashboard.png'),full_page=True)
             assert errors==[],errors
             browser.close()
-            print('PASS: watchlist, search, add/remove, threshold, append-only snapshot, details/chart, grounded Q&A, real/demo isolation, CSV logs and schedule, mobile layout; no browser JS errors.')
+            print('PASS: watchlist, search, add/remove, threshold, snapshots, details/charts, 31 calendar days, season filtering, historical frequencies, news error states, Q&A, real/demo isolation, CSV imports and mobile layout; no browser JS errors.')
     finally:
         process.terminate();process.wait(timeout=10)
